@@ -1,0 +1,19 @@
+Source: truenas_verify
+Maintainer: Caleb <yocalebo@gmail.com>
+Section: python
+Priority: optional
+Build-Depends:	debhelper (>= 12),
+		dh-python,
+		python3-setuptools,
+		python3-all,
+		python3-sgio,
+		python3-nvme
+Standards-Version: 4.3.0
+
+Package: python3-truenas-verify
+Architecture: all
+Depends:	python3-nvme,
+		python3-sgio,
+		${misc:Depends},
+		${python3:Depends}
+Description: TrueNAS SCALE File Hash Verification
