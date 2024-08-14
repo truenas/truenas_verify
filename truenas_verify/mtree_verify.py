@@ -92,7 +92,7 @@ def load_mtree_file():
             yield line
 
 
-if __name__ == '__main__':
+def main():
     errors = []
 
     for line in load_mtree_file():

@@ -12,7 +12,7 @@ setup(
     install_requires=[],
     entry_points={
         'console_scripts': [
-            'truenas_verify = truenas_verify.mtree_verify',
+            'truenas_verify = truenas_verify.mtree_verify:main',
         ],
     },
 )
