@@ -4,6 +4,7 @@ Section: python
 Priority: optional
 Build-Depends:	debhelper (>= 12),
     dh-python,
+    python3-setuptools,
     python3-all
 Standards-Version: 4.3.0
 Homepage: https://github.com/truenas/truenas_verify
