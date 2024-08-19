@@ -1,10 +1,10 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: py-fenced
-Upstream-Contact: Caleb St. John <yocalebo@gmail.com>
-Source: https://github.com/truenas/py-fenced
+Upstream-Name: truenas_verify
+Upstream-Contact: iX Development Team <dev@ixsystems.com>
+Source: https://github.com/truenas/truenas_verify
 
 Files: *
-Copyright: 2020 Caleb St. John
+Copyright: 2024 iXsystems, Inc.
 License: BSD-3-clause
  Redistribution and use in source and binary forms, with or without
  modification, are permitted provided that the following conditions

@@ -1,4 +1,4 @@
-truenas_verify (0.1) experimental; urgency=medium
+truenas-verify (0.1) experimental; urgency=medium
 
   [ Logan Cary ]
   * initial deb package
