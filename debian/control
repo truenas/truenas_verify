@@ -1,9 +1,10 @@
-Source: truenas_verify
+Source: truenas-verify
 Maintainer: iX Development Team <dev@ixsystems.com>
 Section: python
 Priority: optional
 Build-Depends:	debhelper (>= 12), dh-python
 Standards-Version: 4.3.0
+Homepage: https://github.com/truenas/truenas_verify
 
 Package: python3-truenas-verify
 Architecture: all
