@@ -1,9 +1,12 @@
-from hashlib import file_digest
 from collections import namedtuple
+from hashlib import file_digest
+from multiprocessing import Pool
 from os import lstat
 from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE
+import sys
 
 
+LOG_PATH = '/var/log/truenas_verify.log'
 MTREE_FILE_PATH = '/conf/rootfs.mtree'
 MTREE_ENTRY = namedtuple('MtreeEntry', ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256'])
 
@@ -59,16 +62,16 @@ def validate_file_sha256sum(entry, errors):
             errors.append(f'{entry.fname}: expected: {entry.sha256}, got: {hash}')
 
 
-def validate_mtree_entry(entry, errors):
+def validate_mtree_entry(entry) -> list[str]:
     try:
         st = lstat(entry.fname)
     except FileNotFoundError:
-        errors.append(f'{entry.fname}: file does not exist.')
-        return
+        return [f'{entry.fname}: file does not exist.']
 
     assert st.st_uid == entry.uid, entry.fname
     assert st.st_gid == entry.gid, entry.fname
 
+    errors = []
     match entry.type:
         case 'dir':
             if not S_ISDIR(st.st_mode):
@@ -85,19 +88,41 @@ def validate_mtree_entry(entry, errors):
     if oct(S_IMODE(st.st_mode))[2:] != entry.mode:
         errors.append(f'{entry.fname}: got mode {oct(S_IMODE(st.st_mode))}, expected: {entry.mode}')
 
+    return errors
+
 
 def load_mtree_file():
     with open(MTREE_FILE_PATH, 'r') as f:
+        chunk_size = 1000
+        chunk = []
         for line in f:
-            yield line
+            chunk.append(line)
+            if len(chunk) >= chunk_size:
+                yield ''.join(chunk)
+                chunk.clear()
+        if chunk:
+            yield ''.join(chunk)
+
+
+def process_chunk(chunk) -> list[str]:
+    errors = []
+    for line in chunk.splitlines():
+        if (entry := parse_mtree_entry(line)) is not None:
+            errors.extend(validate_mtree_entry(entry))
+    return errors
 
 
 def main():
-    errors = []
+    with Pool() as pool:
+        results = pool.imap_unordered(process_chunk, load_mtree_file())
+        errors = [e for r in results for e in r]
 
-    for line in load_mtree_file():
-        if (entry := parse_mtree_entry(line)) is not None:
-            validate_mtree_entry(entry, errors)
+    if errors:
+        with open(LOG_PATH, 'w') as f:
+            f.write('\n'.join(errors))
+        print(f'{len(errors)} discrepancies found. Logged in {LOG_PATH}', file=sys.stderr)
+        sys.exit(1)
 
-    with open('/var/log/truenas_verify.log', 'w') as f:
-        f.write('\n'.join(errors))
+
+if __name__ == '__main__':
+    main()
