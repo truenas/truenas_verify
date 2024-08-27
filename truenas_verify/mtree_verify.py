@@ -1,13 +1,16 @@
 from collections import namedtuple
 from hashlib import file_digest
-from multiprocessing import Pool
+from multiprocessing import cpu_count, Pool
 from os import lstat
 from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE
 import sys
 
+from middlewared.utils.itertools import batched
+
 
 LOG_PATH = '/var/log/truenas_verify.log'
 MTREE_FILE_PATH = '/conf/rootfs.mtree'
+CHUNK_SIZE = 1000
 MTREE_ENTRY = namedtuple('MtreeEntry', ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256'])
 
 
@@ -68,10 +71,12 @@ def validate_mtree_entry(entry) -> list[str]:
     except FileNotFoundError:
         return [f'{entry.fname}: file does not exist.']
 
-    assert st.st_uid == entry.uid, entry.fname
-    assert st.st_gid == entry.gid, entry.fname
-
     errors = []
+    if st.st_uid != entry.uid:
+        errors.append(f'{entry.fname}: got uid {st.st_uid}, expected: {entry.uid}')
+    if st.st_gid != entry.gid:
+        errors.append(f'{entry.fname}: got gid {st.st_gid}, expected: {entry.gid}')
+
     match entry.type:
         case 'dir':
             if not S_ISDIR(st.st_mode):
@@ -91,37 +96,23 @@ def validate_mtree_entry(entry) -> list[str]:
     return errors
 
 
-def load_mtree_file():
-    with open(MTREE_FILE_PATH, 'r') as f:
-        chunk_size = 1000
-        chunk = []
-        for line in f:
-            chunk.append(line)
-            if len(chunk) >= chunk_size:
-                yield ''.join(chunk)
-                chunk.clear()
-        if chunk:
-            yield ''.join(chunk)
-
-
 def process_chunk(chunk) -> list[str]:
     errors = []
-    for line in chunk.splitlines():
+    for line in chunk:
         if (entry := parse_mtree_entry(line)) is not None:
             errors.extend(validate_mtree_entry(entry))
     return errors
 
 
 def main():
-    with Pool() as pool:
-        results = pool.imap_unordered(process_chunk, load_mtree_file())
+    with Pool(min(cpu_count(), 6)) as pool, open(MTREE_FILE_PATH, 'r') as f:
+        results = pool.imap_unordered(process_chunk, batched(f, CHUNK_SIZE))
         errors = [e for r in results for e in r]
 
     if errors:
         with open(LOG_PATH, 'w') as f:
             f.write('\n'.join(errors))
-        print(f'{len(errors)} discrepancies found. Logged in {LOG_PATH}', file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f'{len(errors)} discrepancies found. Logged in {LOG_PATH}')
 
 
 if __name__ == '__main__':
