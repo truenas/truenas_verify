@@ -1,11 +1,10 @@
 from collections import namedtuple
 from hashlib import file_digest
+import itertools
 from multiprocessing import cpu_count, Pool
 from os import lstat
 from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE
 import sys
-
-from middlewared.utils.itertools import batched
 
 
 LOG_PATH = '/var/log/truenas_verify.log'
@@ -102,6 +101,23 @@ def process_chunk(chunk) -> set[str]:
         if (entry := parse_mtree_entry(line)) is not None:
             errors.update(validate_mtree_entry(entry))
     return errors
+
+
+def batched(iterable, n):
+    """Batch data from the `iterable` into tuples of length `n`. The last batch may be shorter than `n`.
+
+    batched iter recipe from python 3.11 documentation. Python 3.12 adds a cpython variant of this to `itertools` and
+    so this method should be replaced when TrueNAS python version upgrades to 3.12.
+
+    Copied from middlewared.utils.itertools module.
+
+    """
+    if n < 1:
+        raise ValueError('n must be at least one')
+
+    it = iter(iterable)
+    while batch := tuple(itertools.islice(it, n)):
+        yield batch
 
 
 def main():
