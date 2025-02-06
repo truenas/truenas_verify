@@ -4,55 +4,64 @@ import itertools
 from multiprocessing import cpu_count, Pool
 from os import lstat
 from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE
+import re
 import sys
 
 
 LOG_PATH = '/var/log/truenas_verify.log'
 MTREE_FILE_PATH = '/conf/rootfs.mtree'
 CHUNK_SIZE = 1000
-MTREE_ENTRY = namedtuple('MtreeEntry', ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256'])
+MTREE_FIELDS = ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256']
+MTREE_ENTRY = namedtuple('MtreeEntry', MTREE_FIELDS, defaults=(None,) * len(MTREE_FIELDS))
+
+# We want to initially split the line into 6 parts with the first being the file name.
+# Following the type field entries may contain 'link' or 'size', but not both.
+# The 'link' or 'size' field is the anchor for the pseudo 'extra' field.
+MTREE_ENTRY_FIELDS = [' mode=', ' gid=', ' uid=', ' type=', ' link=', ' size=']
+
+# The 'extra' field is type dependent.
+MTREE_FILE_FIELDS = [' size=', ' sha256digest=']
 
 
-def parse_mtree_entry(line):
+def split_at_fields(line, fields):
+    """
+    Split the input into it's major parts: fname, mode, gid, uid, extra (includes type).
+
+    Sample of a simple decoded mtree entry:
+        ./boot mode=755 gid=0 uid=0 type=dir
+
+    Sample of a more complicated decoded mtree entry:
+        ./usr/lib/python3/dist-packages/setuptools/script (dev).tmpl mode=644 gid=0 uid=0 type=file size=218 sha256digest=454cd0cc2414697b7074bb581d661b21098e6844b906baaad45bd403fb6efb92
+    """
+
+    regex_pattern = '|'.join(re.escape(field) for field in fields)
+
+    return re.split(regex_pattern, line)
+
+
+def parse_mtree_entry(line: str) -> tuple:
+    """
+    Process a decoded mtree line into a normalized MTREE_ENTRY tuple
+    """
+
     if line.startswith('#'):
         return None
 
-    fname, mode, gid, uid, extra = line[1:].split(maxsplit=4)
-    if extra.startswith('type=dir'):
-        entry = MTREE_ENTRY(
-            fname,
-            mode.split('=')[1],
-            int(uid.split('=')[1]),
-            int(gid.split('=')[1]),
-            'dir',
-            None,
-            None,
-            None
-        )
-    elif extra.startswith('type=link'):
-        ftype, link = extra.split()
-        entry = MTREE_ENTRY(
-            fname,
-            mode.split('=')[1],
-            int(uid.split('=')[1]),
-            int(gid.split('=')[1]),
-            'link',
-            link.split('=')[1],
-            None,
-            None
-        )
-    else:
-        ftype, size, shasum = extra.split()
-        entry = MTREE_ENTRY(
-            fname,
-            mode.split('=')[1],
-            int(uid.split('=')[1]),
-            int(gid.split('=')[1]),
-            ftype.split('=')[1],
-            None,
-            int(size.split('=')[1]),
-            shasum.split('=')[1]
-        )
+    # Get the standard fields with fix-up for the short 'dir' entries.
+    split_entry = split_at_fields(line[1:], MTREE_ENTRY_FIELDS)
+    fname, mode, gid, uid, type, extra = split_entry[:6] if len(split_entry) > 5 else split_entry + [None]
+
+    match type:
+        case 'dir':
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type)
+        case 'link':
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, link=extra)
+        case 'file':
+            size_field, sha256_field = split_at_fields(extra, MTREE_FILE_FIELDS)
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, size=int(size_field), sha256=sha256_field)
+        case _:
+            # Should not get here.  Send it up for reporting.
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, link=extra)
 
     return entry
 
@@ -88,6 +97,9 @@ def validate_mtree_entry(entry) -> list[str]:
         case 'link':
             if not S_ISLNK(st.st_mode):
                 errors.append(f'{entry.fname}: incorrect file type.')
+        case _:
+            # Report unhandled file types
+            errors.append(f"{entry.fname}: unhandled type '{entry.type}'.  extra={entry.link}")
 
     if oct(S_IMODE(st.st_mode))[2:] != entry.mode:
         errors.append(f'{entry.fname}: got mode {oct(S_IMODE(st.st_mode))}, expected: {entry.mode}')
@@ -97,7 +109,9 @@ def validate_mtree_entry(entry) -> list[str]:
 
 def process_chunk(chunk) -> list[str]:
     errors = []
-    for line in chunk:
+    for eline in chunk:
+        # Crazy but effective decode process.
+        line = eline.encode('latin-1').decode('unicode_escape').encode('latin-1').decode('utf-8').strip()
         if (entry := parse_mtree_entry(line)) is not None:
             errors.extend(validate_mtree_entry(entry))
     return errors
