@@ -1,4 +1,5 @@
 from collections import namedtuple
+from datetime import datetime, UTC
 from hashlib import file_digest
 import itertools
 from multiprocessing import cpu_count, Pool
@@ -6,9 +7,10 @@ from os import lstat
 from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE
 import re
 import sys
+import syslog
 
 
-LOG_PATH = '/var/log/truenas_verify.log'
+LOG_PATH_NAME = '/var/log/truenas_verify'
 MTREE_FILE_PATH = '/conf/rootfs.mtree'
 CHUNK_SIZE = 1000
 MTREE_FIELDS = ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256']
@@ -135,14 +137,48 @@ def batched(iterable, n):
 
 
 def main():
-    with Pool(min(cpu_count(), 6)) as pool, open(MTREE_FILE_PATH, 'r') as f:
-        results = pool.imap_unordered(process_chunk, batched(f, CHUNK_SIZE))
-        errors = [e for r in results for e in r]
+    """
+    Validate the root file system.
+    Passing in 'syslog' as a parameter will direct all output to syslog.
+    Default will output a message to console and data to RESULT_LOG_PATH.
+    """
+    use_syslog = False
+    create_init = False
+    log_path = f"{LOG_PATH_NAME}.log"
+    try:
+        match sys.argv[1]:
+            case 'syslog':
+                use_syslog = True
+            case 'init':
+                create_init = True
+                log_path = f"{LOG_PATH_NAME}_{sys.argv[2]}.log"
+            # ignore bogus parameters
+    except Exception:
+        pass
 
-    if errors:
-        with open(LOG_PATH, 'w') as f:
-            f.write('\n'.join(errors))
-        sys.exit(f'{len(errors)} discrepancies found. Logged in {LOG_PATH}')
+    with Pool(min(cpu_count(), 6)) as pool, open(MTREE_FILE_PATH, 'r') as mtree_file:
+        results = pool.imap_unordered(process_chunk, batched(mtree_file, CHUNK_SIZE))
+        detected_changes = [e for r in results for e in r]
+
+    msg = f"{len(detected_changes)} discrepancies found."
+    if use_syslog:
+        # Log all results to syslog
+        syslog.openlog(ident="truenas_verify")
+        try:
+            syslog.syslog(msg)
+            for entry in detected_changes:
+                syslog.syslog(entry)
+        finally:
+            syslog.closelog()
+    else:
+        # Log headline results to console and details to LOG_PATH
+        with open(log_path, 'w') as f:
+            f.write(f"{str(datetime.now(UTC))}: {msg}")
+            f.write('\n'.join(detected_changes))
+            f.write('\n')  # Add closing CR
+        if not create_init:
+            # Output a message if not an init call
+            sys.exit(f'{msg} Logged in {log_path}')
 
 
 if __name__ == '__main__':
