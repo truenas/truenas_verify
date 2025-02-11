@@ -10,7 +10,7 @@ import sys
 import syslog
 
 
-LOG_PATH_NAME = '/var/log/truenas_verify'
+LOG_PATH_NAME = '/var/log/audit/truenas_verify'
 MTREE_FILE_PATH = '/conf/rootfs.mtree'
 CHUNK_SIZE = 1000
 MTREE_FIELDS = ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256']
@@ -151,7 +151,7 @@ def main():
                 use_syslog = True
             case 'init':
                 create_init = True
-                log_path = f"{LOG_PATH_NAME}_{sys.argv[2]}.log"
+                log_path = f"{LOG_PATH_NAME}.{sys.argv[2]}.log"
             # ignore bogus parameters
     except Exception:
         pass
