@@ -23,9 +23,11 @@ MTREE_ENTRY_FIELDS = [' mode=', ' gid=', ' uid=', ' type=', ' link=', ' size=']
 
 # The 'extra' field is type dependent.
 MTREE_FILE_FIELDS = [' size=', ' sha256digest=']
+MTREE_ENTRY_RE = re.compile('|'.join(re.escape(field) for field in MTREE_ENTRY_FIELDS))
+MTREE_FILE_RE = re.compile('|'.join(re.escape(field) for field in MTREE_FILE_FIELDS))
 
 
-def split_at_fields(line, fields):
+def split_at_fields(line, pattern):
     """
     Split the input into it's major parts: fname, mode, gid, uid, extra (includes type).
 
@@ -35,10 +37,7 @@ def split_at_fields(line, fields):
     Sample of a more complicated decoded mtree entry:
         ./usr/lib/python3/dist-packages/setuptools/script (dev).tmpl mode=644 gid=0 uid=0 type=file size=218 sha256digest=454cd0cc2414697b7074bb581d661b21098e6844b906baaad45bd403fb6efb92
     """
-
-    regex_pattern = '|'.join(re.escape(field) for field in fields)
-
-    return re.split(regex_pattern, line)
+    return pattern.split(line)
 
 
 def parse_mtree_entry(line: str) -> tuple:
@@ -50,7 +49,7 @@ def parse_mtree_entry(line: str) -> tuple:
         return None
 
     # Get the standard fields with fix-up for the short 'dir' entries.
-    split_entry = split_at_fields(line[1:], MTREE_ENTRY_FIELDS)
+    split_entry = split_at_fields(line[1:], MTREE_ENTRY_RE)
     fname, mode, gid, uid, type, extra = split_entry[:6] if len(split_entry) > 5 else split_entry + [None]
 
     match type:
@@ -59,7 +58,7 @@ def parse_mtree_entry(line: str) -> tuple:
         case 'link':
             entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, link=extra)
         case 'file':
-            size_field, sha256_field = split_at_fields(extra, MTREE_FILE_FIELDS)
+            size_field, sha256_field = split_at_fields(extra, MTREE_FILE_RE)
             entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, size=int(size_field), sha256=sha256_field)
         case _:
             # Should not get here.  Send it up for reporting.
@@ -140,7 +139,8 @@ def main():
     """
     Validate the root file system.
     Passing in 'syslog' as a parameter will direct all output to syslog.
-    Default will output a message to console and data to RESULT_LOG_PATH.
+    Passing in 'init <version string> will generate a versioned log in /var/log/audit
+    Default will output a status message to console and details to /var/log/audit/truenas_verify.log
     """
     use_syslog = False
     create_init = False
