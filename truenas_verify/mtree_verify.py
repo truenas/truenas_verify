@@ -135,23 +135,23 @@ def batched(iterable, n):
         yield batch
 
 
-def main():
+def do_verify(args: list):
     """
     Validate the root file system.
-    Passing in 'syslog' as a parameter will direct all output to syslog.
-    Passing in 'init <version string> will generate a versioned log in /var/log/audit
+    Passing in ['syslog'] as a parameter will direct all output to syslog.
+    Passing in ['init', <version string>] will generate a versioned log in /var/log/audit
     Default will output a status message to console and details to /var/log/audit/truenas_verify.log
     """
     use_syslog = False
     create_init = False
     log_path = f"{LOG_PATH_NAME}.log"
     try:
-        match sys.argv[1]:
+        match args[0]:
             case 'syslog':
                 use_syslog = True
             case 'init':
                 create_init = True
-                log_path = f"{LOG_PATH_NAME}.{sys.argv[2]}.log"
+                log_path = f"{LOG_PATH_NAME}.{args[1]}.log"
             # ignore bogus parameters
     except Exception:
         pass
@@ -178,8 +178,15 @@ def main():
             f.write('\n')  # Add closing CR
         if not create_init:
             # Output a message if not an init call
-            sys.exit(f'{msg} Logged in {log_path}')
+            print(f'{msg} Logged in {log_path}')
+
+    if detected_changes:
+        return 1
+
+
+def main():
+    return do_verify(sys.argv[1:])
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
