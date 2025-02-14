@@ -173,7 +173,7 @@ def do_verify(args: list):
     else:
         # Log headline results to console and details to LOG_PATH
         with open(log_path, 'w') as f:
-            f.write(f"{str(datetime.now(UTC))}: {msg}")
+            f.write(f"{str(datetime.now(UTC))}: {msg}\n")
             f.write('\n'.join(detected_changes))
             f.write('\n')  # Add closing CR
         if not create_init:
