@@ -1,58 +1,68 @@
 from collections import namedtuple
+from datetime import datetime, UTC
 from hashlib import file_digest
 import itertools
 from multiprocessing import cpu_count, Pool
 from os import lstat
 from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE
+import re
 import sys
+import syslog
 
 
-LOG_PATH = '/var/log/truenas_verify.log'
+LOG_PATH_NAME = '/var/log/audit/truenas_verify'
 MTREE_FILE_PATH = '/conf/rootfs.mtree'
 CHUNK_SIZE = 1000
-MTREE_ENTRY = namedtuple('MtreeEntry', ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256'])
+MTREE_FIELDS = ['fname', 'mode', 'uid', 'gid', 'type', 'link', 'size', 'sha256']
+MTREE_ENTRY = namedtuple('MtreeEntry', MTREE_FIELDS, defaults=(None,) * len(MTREE_FIELDS))
+
+# We want to initially split the line into 6 parts with the first being the file name.
+# Following the type field entries may contain 'link' or 'size', but not both.
+# The 'link' or 'size' field is the anchor for the pseudo 'extra' field.
+MTREE_ENTRY_FIELDS = [' mode=', ' gid=', ' uid=', ' type=', ' link=', ' size=']
+
+# The 'extra' field is type dependent.
+MTREE_FILE_FIELDS = [' size=', ' sha256digest=']
+MTREE_ENTRY_RE = re.compile('|'.join(re.escape(field) for field in MTREE_ENTRY_FIELDS))
+MTREE_FILE_RE = re.compile('|'.join(re.escape(field) for field in MTREE_FILE_FIELDS))
 
 
-def parse_mtree_entry(line):
+def split_at_fields(line, pattern):
+    """
+    Split the input into it's major parts: fname, mode, gid, uid, extra (includes type).
+
+    Sample of a simple decoded mtree entry:
+        ./boot mode=755 gid=0 uid=0 type=dir
+
+    Sample of a more complicated decoded mtree entry:
+        ./usr/lib/python3/dist-packages/setuptools/script (dev).tmpl mode=644 gid=0 uid=0 type=file size=218 sha256digest=454cd0cc2414697b7074bb581d661b21098e6844b906baaad45bd403fb6efb92
+    """
+    return pattern.split(line)
+
+
+def parse_mtree_entry(line: str) -> tuple:
+    """
+    Process a decoded mtree line into a normalized MTREE_ENTRY tuple
+    """
+
     if line.startswith('#'):
         return None
 
-    fname, mode, gid, uid, extra = line[1:].split(maxsplit=4)
-    if extra.startswith('type=dir'):
-        entry = MTREE_ENTRY(
-            fname,
-            mode.split('=')[1],
-            int(uid.split('=')[1]),
-            int(gid.split('=')[1]),
-            'dir',
-            None,
-            None,
-            None
-        )
-    elif extra.startswith('type=link'):
-        ftype, link = extra.split()
-        entry = MTREE_ENTRY(
-            fname,
-            mode.split('=')[1],
-            int(uid.split('=')[1]),
-            int(gid.split('=')[1]),
-            'link',
-            link.split('=')[1],
-            None,
-            None
-        )
-    else:
-        ftype, size, shasum = extra.split()
-        entry = MTREE_ENTRY(
-            fname,
-            mode.split('=')[1],
-            int(uid.split('=')[1]),
-            int(gid.split('=')[1]),
-            ftype.split('=')[1],
-            None,
-            int(size.split('=')[1]),
-            shasum.split('=')[1]
-        )
+    # Get the standard fields with fix-up for the short 'dir' entries.
+    split_entry = split_at_fields(line[1:], MTREE_ENTRY_RE)
+    fname, mode, gid, uid, type, extra = split_entry[:6] if len(split_entry) > 5 else split_entry + [None]
+
+    match type:
+        case 'dir':
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type)
+        case 'link':
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, link=extra)
+        case 'file':
+            size_field, sha256_field = split_at_fields(extra, MTREE_FILE_RE)
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, size=int(size_field), sha256=sha256_field)
+        case _:
+            # Should not get here.  Send it up for reporting.
+            entry = MTREE_ENTRY(fname, mode, int(uid), int(gid), type, link=extra)
 
     return entry
 
@@ -88,6 +98,9 @@ def validate_mtree_entry(entry) -> list[str]:
         case 'link':
             if not S_ISLNK(st.st_mode):
                 errors.append(f'{entry.fname}: incorrect file type.')
+        case _:
+            # Report unhandled file types
+            errors.append(f"{entry.fname}: unhandled type '{entry.type}'.  extra={entry.link}")
 
     if oct(S_IMODE(st.st_mode))[2:] != entry.mode:
         errors.append(f'{entry.fname}: got mode {oct(S_IMODE(st.st_mode))}, expected: {entry.mode}')
@@ -97,7 +110,9 @@ def validate_mtree_entry(entry) -> list[str]:
 
 def process_chunk(chunk) -> list[str]:
     errors = []
-    for line in chunk:
+    for eline in chunk:
+        # Crazy but effective decode process.
+        line = eline.encode('latin-1').decode('unicode_escape').encode('latin-1').decode('utf-8').strip()
         if (entry := parse_mtree_entry(line)) is not None:
             errors.extend(validate_mtree_entry(entry))
     return errors
@@ -120,16 +135,58 @@ def batched(iterable, n):
         yield batch
 
 
-def main():
-    with Pool(min(cpu_count(), 6)) as pool, open(MTREE_FILE_PATH, 'r') as f:
-        results = pool.imap_unordered(process_chunk, batched(f, CHUNK_SIZE))
-        errors = [e for r in results for e in r]
+def do_verify(args: list):
+    """
+    Validate the root file system.
+    Passing in ['syslog'] as a parameter will direct all output to syslog.
+    Passing in ['init', <version string>] will generate a versioned log in /var/log/audit
+    Default will output a status message to console and details to /var/log/audit/truenas_verify.log
+    """
+    use_syslog = False
+    create_init = False
+    log_path = f"{LOG_PATH_NAME}.log"
+    try:
+        match args[0]:
+            case 'syslog':
+                use_syslog = True
+            case 'init':
+                create_init = True
+                log_path = f"{LOG_PATH_NAME}.{args[1]}.log"
+            # ignore bogus parameters
+    except Exception:
+        pass
 
-    if errors:
-        with open(LOG_PATH, 'w') as f:
-            f.write('\n'.join(errors))
-        sys.exit(f'{len(errors)} discrepancies found. Logged in {LOG_PATH}')
+    with Pool(min(cpu_count(), 6)) as pool, open(MTREE_FILE_PATH, 'r') as mtree_file:
+        results = pool.imap_unordered(process_chunk, batched(mtree_file, CHUNK_SIZE))
+        detected_changes = [e for r in results for e in r]
+
+    msg = f"{len(detected_changes)} discrepancies found."
+    if use_syslog:
+        # Log all results to syslog
+        syslog.openlog(ident="truenas_verify")
+        try:
+            syslog.syslog(msg)
+            for entry in detected_changes:
+                syslog.syslog(entry)
+        finally:
+            syslog.closelog()
+    else:
+        # Log headline results to console and details to LOG_PATH
+        with open(log_path, 'w') as f:
+            f.write(f"{str(datetime.now(UTC))}: {msg}\n")
+            f.write('\n'.join(detected_changes))
+            f.write('\n')  # Add closing CR
+        if not create_init:
+            # Output a message if not an init call
+            print(f'{msg} Logged in {log_path}')
+
+    if detected_changes:
+        return 1
+
+
+def main():
+    return do_verify(sys.argv[1:])
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
