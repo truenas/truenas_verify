@@ -170,6 +170,8 @@ def do_verify(args: list):
                 syslog.syslog(entry)
         finally:
             syslog.closelog()
+            # Output a message for middleware alert
+            print(msg)
     else:
         # Log headline results to console and details to LOG_PATH
         with open(log_path, 'w') as f:
